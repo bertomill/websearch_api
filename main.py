@@ -1,7 +1,7 @@
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, HttpUrl
-from typing import Optional, List, Dict
+from typing import Optional, List, Dict, Union
 import os
 from dotenv import load_dotenv
 from selenium import webdriver
@@ -61,6 +61,9 @@ client = OpenAI(
 class WebsiteRequest(BaseModel):
     url: HttpUrl
     analysis_type: Optional[str] = "general"
+    enable_web_search: Optional[bool] = False
+    search_context_size: Optional[str] = "medium"
+    user_location: Optional[Dict[str, str]] = None
 
 def extract_styles(driver, soup):
     """Extract styling information from the website"""
@@ -232,13 +235,45 @@ async def analyze_website(request: WebsiteRequest):
         logger.info("Screenshots taken successfully")
         
         # Analyze content with OpenAI
-        response = client.chat.completions.create(
-            model="gpt-4",
-            messages=[
-                {"role": "system", "content": "You are a business analyst and web design expert. Analyze the following website content, styles, and provide insights about the company and its design approach."},
-                {"role": "user", "content": f"""
-                Please analyze this website and provide:
-                1. Company insights
+        if request.enable_web_search:
+            logger.info("Using web search for enhanced analysis")
+            
+            # Configure web search tool
+            web_search_tool = {
+                "type": "web_search_preview"
+            }
+            
+            # Add search context size if provided
+            if request.search_context_size in ["low", "medium", "high"]:
+                web_search_tool["search_context_size"] = request.search_context_size
+            
+            # Add user location if provided
+            if request.user_location:
+                location_data = {"type": "approximate"}
+                
+                if "country" in request.user_location:
+                    location_data["country"] = request.user_location["country"]
+                    
+                if "city" in request.user_location:
+                    location_data["city"] = request.user_location["city"]
+                    
+                if "region" in request.user_location:
+                    location_data["region"] = request.user_location["region"]
+                    
+                if "timezone" in request.user_location:
+                    location_data["timezone"] = request.user_location["timezone"]
+                    
+                web_search_tool["user_location"] = location_data
+                
+            # Create a response object using the Responses API with web search
+            response = client.responses.create(
+                model="gpt-4o",
+                tools=[web_search_tool],
+                input=f"""
+                Analyze this website: {str(request.url)}
+                
+                Please provide:
+                1. Company insights with up-to-date information about the company
                 2. Design analysis including:
                    - Color scheme analysis
                    - Typography analysis
@@ -248,17 +283,61 @@ async def analyze_website(request: WebsiteRequest):
                 
                 Website content: {text_content[:4000]}
                 Styles: {json.dumps(styles)}
-                """}
-            ]
-        )
+                """
+            )
+            
+            analysis = response.output_text
+            # Include citation information if available
+            citations = []
+            if hasattr(response, 'message') and hasattr(response.message, 'content'):
+                for content in response.message.content:
+                    if hasattr(content, 'annotations'):
+                        for annotation in content.annotations:
+                            if annotation.type == "url_citation":
+                                citations.append({
+                                    "url": annotation.url,
+                                    "title": annotation.title,
+                                    "start_index": annotation.start_index,
+                                    "end_index": annotation.end_index
+                                })
+            
+        else:
+            # Use standard chat completion without web search
+            response = client.chat.completions.create(
+                model="gpt-4",
+                messages=[
+                    {"role": "system", "content": "You are a business analyst and web design expert. Analyze the following website content, styles, and provide insights about the company and its design approach."},
+                    {"role": "user", "content": f"""
+                    Please analyze this website and provide:
+                    1. Company insights
+                    2. Design analysis including:
+                       - Color scheme analysis
+                       - Typography analysis
+                       - Layout analysis
+                       - Design patterns used
+                    3. A design prompt that could be used to recreate a similar design
+                    
+                    Website content: {text_content[:4000]}
+                    Styles: {json.dumps(styles)}
+                    """}
+                ]
+            )
+            analysis = response.choices[0].message.content
+            citations = []
         
-        return {
+        result = {
             "url": str(request.url),
-            "analysis": response.choices[0].message.content,
+            "analysis": analysis,
             "styles": styles,
             "screenshots": screenshots,
             "timestamp": datetime.utcnow().isoformat()
         }
+        
+        # Add citations if web search was used and citations exist
+        if request.enable_web_search and citations:
+            result["citations"] = citations
+            
+        return result
         
     except TimeoutException:
         logger.error("Timeout while loading website")
