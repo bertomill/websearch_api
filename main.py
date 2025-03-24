@@ -52,11 +52,13 @@ app.add_middleware(
 # Add trusted host middleware
 app.add_middleware(TrustedHostMiddleware, allowed_hosts=["*"])
 
-# Configure OpenAI
-client = OpenAI(
-    api_key=os.getenv("OPENAI_API_KEY"),
-    base_url="https://api.openai.com/v1"  # Explicitly set the base URL
-)
+# Configure OpenAI - use a simpler initialization to avoid httpx proxies error
+api_key = os.getenv("OPENAI_API_KEY")
+if not api_key:
+    logger.warning("OPENAI_API_KEY not found in environment variables")
+
+client = OpenAI()
+client.api_key = api_key
 
 class WebsiteRequest(BaseModel):
     url: HttpUrl
